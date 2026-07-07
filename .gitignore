@@ -1,0 +1,12 @@
+# Local dev artifacts — regenerated automatically, never needed in the repo
+.tile_cache/
+__pycache__/
+*.pyc
+
+# Local Claude Code / editor settings
+.claude/
+.vscode/
+
+# OS cruft
+.DS_Store
+Thumbs.db

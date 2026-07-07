@@ -1,0 +1,75 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          66.95727400756056,
+          39.64413659319492
+        ]
+      },
+      "properties": {
+        "name": "Universitet xiyoboni stansiyasi",
+        "color": "#e74c3c"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          66.92223344924317,
+          39.64000276151647
+        ]
+      },
+      "properties": {
+        "name": "Turizm kolleji stansiyasi",
+        "color": "#e67e22"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          66.97363192722831,
+          39.65296387721775
+        ]
+      },
+      "properties": {
+        "name": "Registon stansiyasi",
+        "color": "#2ecc71"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          66.92800530022969,
+          39.66656749955605
+        ]
+      },
+      "properties": {
+        "name": "Muzey stansiyasi",
+        "color": "#9b59b6"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          66.9725040491019,
+          39.66838507562934
+        ]
+      },
+      "properties": {
+        "name": "Dahbed stansiyasi",
+        "color": "#3498db"
+      }
+    }
+  ]
+}

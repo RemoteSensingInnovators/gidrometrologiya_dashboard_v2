@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Samarqand shahrining atmosfera havosini ifloslanish geoportali</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header>
+    <div class="hero">
+      <div>
+        <h1>Samarqand shahrining atmosfera havosini ifloslanish geoportali</h1>
+        <p>Havoning asosiy ifloslanish ko'rsatkichlari, yillik trendlar va joylashuv xaritasi.</p>
+      </div>
+      <div class="selectors">
+        <label>
+          Yil:
+          <select id="yearSelect"></select>
+        </label>
+        <label>
+          Gazlar:
+          <select id="pollutantSelect"></select>
+        </label>
+        <label>
+          O'lchov:
+          <select id="measureSelect">
+            <option value="Mean">O'rtacha</option>
+            <option value="Max">Maksimal</option>
+          </select>
+        </label>
+        <button id="logoutBtn" onclick="sessionStorage.removeItem('auth');window.location.replace('login.html')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          Chiqish
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="top-grid">
+      <article class="card" id="mapCard">
+        <h2>Samarqand geoxarita</h2>
+        <div id="map"></div>
+        <div id="gasLegend" class="gas-legend">
+          <span id="gasLegendLabel">Gaz</span>
+          <div id="gasLegendBar" class="gas-legend-bar"></div>
+          <span class="gas-legend-hint">Past → Yuqori</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="top-grid">
+      <article class="card" id="map3dCard">
+        <h2>Binolar — 3D xarita (animatsiya)</h2>
+        <div class="map3d-toolbar">
+          <button id="replayAnimBtn" type="button">⟲ Animatsiyani qayta ishga tushirish</button>
+          <button id="toggleRotateBtn" type="button">⏸ Aylanishni to'xtatish</button>
+          <span id="map3dBackendBadge" class="map3d-backend-badge">⋯</span>
+          <span id="map3dBasemapBadge" class="map3d-backend-badge">Xarita: yuklanmoqda…</span>
+          <span class="map3d-hint">Bino balandligi va rangi tanlangan yil/gaz bo'yicha stansiyalarga yaqinlikni, zarralar esa shamol oqimini aks ettiradi.</span>
+        </div>
+        <div class="wind-manual-toolbar">
+          <label>
+            Shamol tezligi (m/s)
+            <input type="number" id="windSpeedInput" min="0" max="40" step="0.5" value="6" />
+          </label>
+          <label>
+            Yo'nalish
+            <select id="windDirInput">
+              <option value="0">Shimoldan (N)</option>
+              <option value="45">Shimoli-sharqdan (NE)</option>
+              <option value="90">Sharqdan (E)</option>
+              <option value="135">Janubi-sharqdan (SE)</option>
+              <option value="180">Janubdan (S)</option>
+              <option value="225">Janubi-g'arbdan (SW)</option>
+              <option value="270">G'arbdan (W)</option>
+              <option value="315">Shimoli-g'arbdan (NW)</option>
+            </select>
+          </label>
+          <button id="applyManualWindBtn" type="button">💨 Shamolni qo'llash</button>
+          <label class="wind-auto-toggle">
+            <input type="checkbox" id="windAutoToggle" checked />
+            Avtomatik (ma'lumotlardan)
+          </label>
+        </div>
+        <div id="map3d-wrap">
+          <div id="map3d"></div>
+          <div id="map3dLoading" class="map3d-loading">
+            <div class="spinner"></div>
+            <p>Binolar yuklanmoqda...</p>
+          </div>
+          <div id="map3dLegend" class="map3d-legend">
+            <strong>Ifloslanish darajasi</strong>
+            <div class="legend-bar"></div>
+            <div class="legend-labels"><span>Past</span><span>Yuqori</span></div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="charts-grid">
+      <article class="card">
+        <h2>Oylik trend</h2>
+        <canvas id="monthChart"></canvas>
+      </article>
+      <article class="card">
+        <h2>1 yillik tahlil gazlar bo'yicha</h2>
+        <canvas id="pollutantChart"></canvas>
+      </article>
+      <article class="card">
+        <h2>Shamol yo'nalishlari</h2>
+        <canvas id="windChart"></canvas>
+      </article>
+    </section>
+
+    <section class="table-card card">
+      <h2>Oylik ma'lumotlar jadvali</h2>
+      <div class="table-scroll">
+        <table id="dataTable"></table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Ma'lumotlar: 2016–2025 yillar. Gazlar va shamol ma'lumotlari, Samarqand geojson xarita.</p>
+    <p id="buildVersion" style="opacity:0.5; font-size:0.75rem; margin-top:6px;">Versiya: 2026-07-01-r3 (xatolarga chidamli rang yangilanishi)</p>
+  </footer>
+
+  <script>
+    if (sessionStorage.getItem('auth') !== 'true') {
+      window.location.replace('login.html');
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="dashboard.js"></script>
+  <script type="module" src="map3d.js"></script>
+</body>
+</html>
