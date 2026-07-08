@@ -270,6 +270,80 @@ function recolorBuildings(intensity) {
 
 // ---------- scene setup ----------
 
+// ---------- roads (OSM-style ribbons) ----------
+
+const ROAD_Y = 0.08; // just above the ground/basemap, well below buildings and the boundary line
+const ROAD_STYLES = {
+  motorway: { color: 0xe892a2, width: 5.5 },
+  motorway_link: { color: 0xe892a2, width: 3.2 },
+  trunk: { color: 0xf9b29c, width: 5 },
+  trunk_link: { color: 0xf9b29c, width: 3 },
+  primary: { color: 0xfcd6a4, width: 4.2 },
+  primary_link: { color: 0xfcd6a4, width: 2.6 },
+  secondary: { color: 0xf7fabf, width: 3.4 },
+  secondary_link: { color: 0xf7fabf, width: 2.2 },
+  tertiary: { color: 0xffffff, width: 2.8 },
+  tertiary_link: { color: 0xffffff, width: 2 },
+  unclassified: { color: 0xf3f3ee, width: 2.2 },
+  residential: { color: 0xffffff, width: 2.2 },
+  living_street: { color: 0xecebe5, width: 1.8 },
+  service: { color: 0xe4e4e0, width: 1.3 },
+  pedestrian: { color: 0xdddde4, width: 1.5 },
+  footway: { color: 0xd68a82, width: 1 },
+  path: { color: 0xd9c19d, width: 1 },
+  construction: { color: 0xcccccc, width: 1.3 },
+  default: { color: 0xd8d8d4, width: 1.4 },
+};
+
+function processRoads(rawGeojson) {
+  const positions = [];
+  const colors = [];
+  const src = rawGeojson.features || [];
+  const roadColor = new THREE.Color();
+
+  for (const feature of src) {
+    const coords = feature.geometry?.coordinates;
+    if (!coords || coords.length < 2) continue;
+    const [lon0, lat0] = coords[0];
+    if (!boundaryContains(boundaryGeometry, lon0, lat0)) continue;
+
+    const style = ROAD_STYLES[feature.properties?.highway] || ROAD_STYLES.default;
+    const hw = style.width / 2;
+    roadColor.setHex(style.color);
+    const r = roadColor.r, g = roadColor.g, b = roadColor.b;
+
+    const local = coords.map(([lon, lat]) => toLocal(lon, lat));
+    for (let i = 0; i < local.length - 1; i++) {
+      const [x0, z0] = local[i];
+      const [x1, z1] = local[i + 1];
+      let dx = x1 - x0, dz = z1 - z0;
+      const len = Math.hypot(dx, dz);
+      if (len < 1e-6) continue;
+      dx /= len; dz /= len;
+      const px = -dz * hw, pz = dx * hw;
+
+      const ax = x0 + px, az = z0 + pz;
+      const bx = x0 - px, bz = z0 - pz;
+      positions.push(
+        ax, ROAD_Y, az, bx, ROAD_Y, bz, x1 - px, ROAD_Y, z1 - pz,
+        ax, ROAD_Y, az, x1 - px, ROAD_Y, z1 - pz, x1 + px, ROAD_Y, z1 + pz,
+      );
+      for (let k = 0; k < 6; k++) colors.push(r, g, b);
+    }
+  }
+
+  return { positions: new Float32Array(positions), colors: new Float32Array(colors) };
+}
+
+function buildRoadsMesh(roadData) {
+  if (!roadData || !roadData.positions.length) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(roadData.positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(roadData.colors, 3));
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  scene.add(new THREE.Mesh(geo, material));
+}
+
 function buildBoundaryLines() {
   if (!boundaryGeometry) return;
   const rings = allOuterRings(boundaryGeometry);
@@ -899,20 +973,23 @@ async function init() {
     window.addEventListener('resize', onResize);
   }
 
+
   try {
-    const [buildingsResp, dataResp, stationsResp, boundaryResp] = await Promise.all([
+    const [buildingsResp, dataResp, stationsResp, boundaryResp, roadsResp] = await Promise.all([
       fetch('buildings.geojson'),
       fetch('data/samarqand_data.json'),
       fetch('data/stations.geojson'),
       fetch('samarqand.json'),
+      fetch('roads.geojson'),
     ]);
     if (!buildingsResp.ok || !dataResp.ok || !stationsResp.ok || !boundaryResp.ok) {
       throw new Error("3D bino ma'lumotlarini yuklab bo'lmadi.");
     }
 
     setLoading(true, "Ma'lumotlar tahlil qilinmoqda...");
-    const [buildingsRaw, dataStore, stationsGeojson, boundaryGeojson] = await Promise.all([
+    const [buildingsRaw, dataStore, stationsGeojson, boundaryGeojson, roadsRaw] = await Promise.all([
       buildingsResp.json(), dataResp.json(), stationsResp.json(), boundaryResp.json(),
+      roadsResp.ok ? roadsResp.json() : Promise.resolve(null),
     ]);
 
     map3dDataStore = dataStore;
@@ -956,6 +1033,11 @@ async function init() {
       const records = processBuildings(buildingsRaw, stationLonLat);
       buildBuildingsMesh(records);
       buildHeightField(records);
+
+      if (roadsRaw) {
+        setLoading(true, "Yo'llar chizilmoqda...");
+        buildRoadsMesh(processRoads(roadsRaw));
+      }
 
       tourStops = buildTourStops();
     }
