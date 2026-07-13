@@ -408,6 +408,7 @@ function buildVehicleSystem({ roads, count, colors, speedRange, yOffset, buildGe
     metalness: 0.3,
     emissive: 0x0a0a0a,
     emissiveIntensity: 0.6,
+    vertexColors: true, // lets baked per-part tints (glass, tires) combine with the per-instance paint color
   });
   const mesh = new THREE.InstancedMesh(geo, material, count);
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -459,6 +460,50 @@ function stepVehicleSystem(sys) {
   mesh.instanceMatrix.needsUpdate = true;
 }
 
+// Bakes a fixed per-vertex tint onto a geometry; combined with the InstancedMesh's
+// per-instance paint color (multiplicatively) so glass/tires/bumpers stay dark
+// no matter which random body color a given car gets.
+function tintGeometry(geo, r, g, b) {
+  const count = geo.attributes.position.count;
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return geo;
+}
+
+function buildCarGeometry() {
+  const parts = [];
+
+  const chassis = new THREE.BoxGeometry(4.3, 0.85, 1.85);
+  chassis.translate(0, 0.775, 0); // rests on top of the wheels, whose bottoms sit at y=0
+  parts.push(tintGeometry(chassis, 1, 1, 1)); // white so it fully takes on the instance paint color
+
+  const cabin = new THREE.BoxGeometry(2.3, 0.72, 1.55);
+  cabin.translate(-0.15, 1.575, 0);
+  parts.push(tintGeometry(cabin, 0.08, 0.09, 0.13)); // tinted glass, stays dark regardless of paint color
+
+  const frontBumper = new THREE.BoxGeometry(0.18, 0.4, 1.9);
+  frontBumper.translate(2.16, 0.55, 0);
+  parts.push(tintGeometry(frontBumper, 0.06, 0.06, 0.07));
+
+  const rearBumper = new THREE.BoxGeometry(0.18, 0.4, 1.9);
+  rearBumper.translate(-2.16, 0.55, 0);
+  parts.push(tintGeometry(rearBumper, 0.06, 0.06, 0.07));
+
+  for (const wx of [1.45, -1.45]) {
+    for (const wz of [0.98, -0.98]) {
+      const wheel = new THREE.CylinderGeometry(0.42, 0.42, 0.32, 14);
+      wheel.rotateX(Math.PI / 2);
+      wheel.translate(wx, 0.42, wz);
+      parts.push(tintGeometry(wheel, 0.02, 0.02, 0.02));
+    }
+  }
+
+  return mergeGeometries(parts, false);
+}
+
 function initCars(carRoads) {
   carSystem = buildVehicleSystem({
     roads: carRoads,
@@ -467,11 +512,7 @@ function initCars(carRoads) {
     speedRange: [0.16, 0.38],
     yOffset: 0.05,
     buildGeometry: () => {
-      const bodyGeo = new THREE.BoxGeometry(4.2, 1.3, 1.9);
-      bodyGeo.translate(0, 0.65, 0); // bottom face sits exactly at y=0 so scaling doesn't lift the car off the road
-      const cabinGeo = new THREE.BoxGeometry(2.1, 0.9, 1.5);
-      cabinGeo.translate(-0.3, 1.75, 0);
-      const carGeo = mergeGeometries([bodyGeo, cabinGeo], false);
+      const carGeo = buildCarGeometry();
       carGeo.scale(CAR_SCALE, CAR_SCALE, CAR_SCALE);
       return carGeo;
     },
