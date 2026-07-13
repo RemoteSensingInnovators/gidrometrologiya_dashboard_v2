@@ -365,7 +365,7 @@ function buildRoadsMesh(roadData) {
 
 // ---------- moving traffic ----------
 
-const CAR_COUNT = 1100;
+const CAR_COUNT = 2200;
 const CAR_SCALE = 3.2; // real car dims are ~4m, invisible from the default ~500m city view — exaggerate for visibility
 const CAR_COLORS = [0xffffff, 0x161616, 0xb4b4b4, 0xb0281f, 0x274e8c, 0xd9b23c, 0x5c5c5c];
 
