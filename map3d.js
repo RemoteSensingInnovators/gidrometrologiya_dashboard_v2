@@ -295,9 +295,16 @@ const ROAD_STYLES = {
   default: { color: 0xd8d8d4, width: 1.4 },
 };
 
+const CAR_HIGHWAYS = new Set([
+  'motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link',
+  'secondary', 'secondary_link', 'tertiary', 'tertiary_link', 'unclassified',
+  'residential', 'living_street', 'service',
+]);
+
 function processRoads(rawGeojson) {
   const positions = [];
   const colors = [];
+  const carRoads = []; // drivable roads, kept as local point paths for the car simulation
   const src = rawGeojson.features || [];
   const roadColor = new THREE.Color();
 
@@ -307,7 +314,8 @@ function processRoads(rawGeojson) {
     const [lon0, lat0] = coords[0];
     if (!boundaryContains(boundaryGeometry, lon0, lat0)) continue;
 
-    const style = ROAD_STYLES[feature.properties?.highway] || ROAD_STYLES.default;
+    const highway = feature.properties?.highway;
+    const style = ROAD_STYLES[highway] || ROAD_STYLES.default;
     const hw = style.width / 2;
     roadColor.setHex(style.color);
     const r = roadColor.r, g = roadColor.g, b = roadColor.b;
@@ -330,9 +338,20 @@ function processRoads(rawGeojson) {
       );
       for (let k = 0; k < 6; k++) colors.push(r, g, b);
     }
+
+    if (CAR_HIGHWAYS.has(highway) && local.length >= 2) {
+      let total = 0;
+      const cum = [0];
+      for (let i = 0; i < local.length - 1; i++) {
+        const [x0, z0] = local[i], [x1, z1] = local[i + 1];
+        total += Math.hypot(x1 - x0, z1 - z0);
+        cum.push(total);
+      }
+      if (total > 10) carRoads.push({ points: local, cum, total, highway });
+    }
   }
 
-  return { positions: new Float32Array(positions), colors: new Float32Array(colors) };
+  return { positions: new Float32Array(positions), colors: new Float32Array(colors), carRoads };
 }
 
 function buildRoadsMesh(roadData) {
@@ -342,6 +361,305 @@ function buildRoadsMesh(roadData) {
   geo.setAttribute('color', new THREE.BufferAttribute(roadData.colors, 3));
   const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
   scene.add(new THREE.Mesh(geo, material));
+}
+
+// ---------- moving traffic ----------
+
+const CAR_COUNT = 1100;
+const CAR_SCALE = 3.2; // real car dims are ~4m, invisible from the default ~500m city view — exaggerate for visibility
+const CAR_COLORS = [0xffffff, 0x161616, 0xb4b4b4, 0xb0281f, 0x274e8c, 0xd9b23c, 0x5c5c5c];
+
+const BUS_COUNT = 110;
+const BUS_LEN = 15, BUS_HEI = 8.5, BUS_WID = 6.5; // deliberately bigger than a scaled car for a clear silhouette
+const BUS_COLORS = [0xffffff, 0xffcc33, 0x2f7dd1, 0xff8c42, 0xc7c7c7];
+const BUS_HIGHWAYS = new Set([
+  'motorway', 'motorway_link', 'trunk', 'trunk_link',
+  'primary', 'primary_link', 'secondary', 'secondary_link', 'tertiary', 'tertiary_link',
+]);
+
+let carSystem = null;
+let busSystem = null;
+const _vehicleDummy = new THREE.Object3D();
+const _vehicleDir = new THREE.Vector3();
+
+function pointAtDistance(road, dist) {
+  const n = road.points.length;
+  if (dist <= 0) return { x: road.points[0][0], z: road.points[0][1] };
+  if (dist >= road.total) return { x: road.points[n - 1][0], z: road.points[n - 1][1] };
+  let seg = 0;
+  for (let i = 1; i < road.cum.length; i++) {
+    if (road.cum[i] >= dist) { seg = i - 1; break; }
+  }
+  const segStart = road.cum[seg];
+  const segLen = road.cum[seg + 1] - segStart;
+  const t = segLen > 0 ? (dist - segStart) / segLen : 0;
+  const [x0, z0] = road.points[seg];
+  const [x1, z1] = road.points[seg + 1];
+  return { x: x0 + (x1 - x0) * t, z: z0 + (z1 - z0) * t };
+}
+
+function buildVehicleSystem({ roads, count, colors, speedRange, yOffset, buildGeometry }) {
+  const roadsRef = (roads || []).filter((r) => r.total > 10);
+  if (!roadsRef.length) return null;
+
+  const geo = buildGeometry();
+  const material = new THREE.MeshStandardMaterial({
+    roughness: 0.3,
+    metalness: 0.3,
+    emissive: 0x0a0a0a,
+    emissiveIntensity: 0.6,
+  });
+  const mesh = new THREE.InstancedMesh(geo, material, count);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const tmpColor = new THREE.Color();
+  const state = [];
+  for (let i = 0; i < count; i++) {
+    const roadIdx = Math.floor(Math.random() * roadsRef.length);
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    state.push({
+      roadIdx,
+      dist: Math.random() * roadsRef[roadIdx].total,
+      speed: speedRange[0] + Math.random() * (speedRange[1] - speedRange[0]),
+      dir,
+    });
+    tmpColor.setHex(colors[Math.floor(Math.random() * colors.length)]);
+    mesh.setColorAt(i, tmpColor);
+  }
+  scene.add(mesh);
+  return { mesh, state, roadsRef, yOffset };
+}
+
+function stepVehicleSystem(sys) {
+  if (!sys) return;
+  const { mesh, state, roadsRef, yOffset } = sys;
+  for (let i = 0; i < state.length; i++) {
+    const c = state[i];
+    let road = roadsRef[c.roadIdx];
+    c.dist += c.dir * c.speed;
+    if (c.dist > road.total || c.dist < 0) {
+      c.roadIdx = Math.floor(Math.random() * roadsRef.length);
+      road = roadsRef[c.roadIdx];
+      c.dir = Math.random() < 0.5 ? 1 : -1;
+      c.dist = c.dir > 0 ? 0 : road.total;
+    }
+
+    const p = pointAtDistance(road, c.dist);
+    const aheadDist = Math.min(road.total, Math.max(0, c.dist + c.dir * 0.6));
+    const p2 = pointAtDistance(road, aheadDist);
+    _vehicleDir.set(p2.x - p.x, 0, p2.z - p.z);
+    if (_vehicleDir.lengthSq() < 1e-6) _vehicleDir.set(1, 0, 0);
+    else _vehicleDir.normalize();
+
+    _vehicleDummy.position.set(p.x, ROAD_Y + yOffset, p.z);
+    _vehicleDummy.quaternion.setFromUnitVectors(UNIT_X, _vehicleDir);
+    _vehicleDummy.updateMatrix();
+    mesh.setMatrixAt(i, _vehicleDummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+function initCars(carRoads) {
+  carSystem = buildVehicleSystem({
+    roads: carRoads,
+    count: CAR_COUNT,
+    colors: CAR_COLORS,
+    speedRange: [0.16, 0.38],
+    yOffset: 0.05,
+    buildGeometry: () => {
+      const bodyGeo = new THREE.BoxGeometry(4.2, 1.3, 1.9);
+      bodyGeo.translate(0, 0.65, 0); // bottom face sits exactly at y=0 so scaling doesn't lift the car off the road
+      const cabinGeo = new THREE.BoxGeometry(2.1, 0.9, 1.5);
+      cabinGeo.translate(-0.3, 1.75, 0);
+      const carGeo = mergeGeometries([bodyGeo, cabinGeo], false);
+      carGeo.scale(CAR_SCALE, CAR_SCALE, CAR_SCALE);
+      return carGeo;
+    },
+  });
+}
+
+function initBuses(carRoads) {
+  const busRoads = (carRoads || []).filter((r) => BUS_HIGHWAYS.has(r.highway));
+  busSystem = buildVehicleSystem({
+    roads: busRoads,
+    count: BUS_COUNT,
+    colors: BUS_COLORS,
+    speedRange: [0.1, 0.2],
+    yOffset: 0.05,
+    buildGeometry: () => {
+      const busGeo = new THREE.BoxGeometry(BUS_LEN, BUS_HEI, BUS_WID);
+      busGeo.translate(0, BUS_HEI / 2, 0);
+      return busGeo;
+    },
+  });
+}
+
+function stepCars() {
+  stepVehicleSystem(carSystem);
+}
+
+function stepBuses() {
+  stepVehicleSystem(busSystem);
+}
+
+// ---------- traffic lights ----------
+
+const TRAFFIC_LIGHT_CYCLE = 14; // seconds: 6 green, 2 yellow, 6 red
+const TRAFFIC_LIGHT_COLORS = { green: 0x2ecc71, yellow: 0xf1c40f, red: 0xe74c3c };
+const TRAFFIC_LIGHT_POLE_H = 11;
+let trafficLightHeads = null;
+let trafficLightPositions = [];
+
+function findIntersections(roads, minDegree, cap) {
+  const counts = new Map();
+  const reps = new Map();
+  const keyOf = (x, z) => `${Math.round(x / 2)},${Math.round(z / 2)}`;
+  for (const road of roads) {
+    const first = road.points[0];
+    const last = road.points[road.points.length - 1];
+    for (const [x, z] of [first, last]) {
+      const key = keyOf(x, z);
+      counts.set(key, (counts.get(key) || 0) + 1);
+      if (!reps.has(key)) reps.set(key, [x, z]);
+    }
+  }
+  let pts = [];
+  for (const [key, count] of counts) {
+    if (count >= minDegree) pts.push(reps.get(key));
+  }
+  for (let i = pts.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pts[i], pts[j]] = [pts[j], pts[i]];
+  }
+  return pts.slice(0, cap);
+}
+
+function initTrafficLights(carRoads) {
+  const points = findIntersections(carRoads || [], 3, 150);
+  if (!points.length) return;
+  trafficLightPositions = points;
+
+  const poleGeo = new THREE.CylinderGeometry(0.35, 0.4, TRAFFIC_LIGHT_POLE_H, 8);
+  poleGeo.translate(0, TRAFFIC_LIGHT_POLE_H / 2, 0);
+  const poleMesh = new THREE.InstancedMesh(
+    poleGeo,
+    new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.6 }),
+    points.length,
+  );
+  points.forEach(([x, z], i) => {
+    _vehicleDummy.position.set(x, ROAD_Y, z);
+    _vehicleDummy.quaternion.identity();
+    _vehicleDummy.updateMatrix();
+    poleMesh.setMatrixAt(i, _vehicleDummy.matrix);
+  });
+  poleMesh.instanceMatrix.needsUpdate = true;
+  scene.add(poleMesh);
+
+  const headGeo = new THREE.BoxGeometry(1.3, 2, 1.3);
+  headGeo.translate(0, TRAFFIC_LIGHT_POLE_H + 0.6, 0);
+  trafficLightHeads = new THREE.InstancedMesh(headGeo, new THREE.MeshBasicMaterial({ vertexColors: true }), points.length);
+  const headColor = new THREE.Color();
+  points.forEach(([x, z], i) => {
+    _vehicleDummy.position.set(x, ROAD_Y, z);
+    _vehicleDummy.quaternion.identity();
+    _vehicleDummy.updateMatrix();
+    trafficLightHeads.setMatrixAt(i, _vehicleDummy.matrix);
+    headColor.setHex(TRAFFIC_LIGHT_COLORS.red);
+    trafficLightHeads.setColorAt(i, headColor);
+  });
+  trafficLightHeads.instanceMatrix.needsUpdate = true;
+  scene.add(trafficLightHeads);
+}
+
+function trafficPhaseColor(t) {
+  if (t < 6) return TRAFFIC_LIGHT_COLORS.green;
+  if (t < 8) return TRAFFIC_LIGHT_COLORS.yellow;
+  return TRAFFIC_LIGHT_COLORS.red;
+}
+
+const _tlColor = new THREE.Color();
+function stepTrafficLights(elapsed) {
+  if (!trafficLightHeads) return;
+  for (let i = 0; i < trafficLightPositions.length; i++) {
+    const phase = (elapsed + i * 3.5) % TRAFFIC_LIGHT_CYCLE;
+    _tlColor.setHex(trafficPhaseColor(phase));
+    trafficLightHeads.setColorAt(i, _tlColor);
+  }
+  trafficLightHeads.instanceColor.needsUpdate = true;
+}
+
+// ---------- pollution haze at major intersections ----------
+
+let pollutionHotspots = null; // { mesh, points, distNorms }
+const _hotspotDummy = new THREE.Object3D();
+
+function nearestStationDistLocal(x, z, stationsLocal) {
+  let best = Infinity;
+  for (const [sx, sz] of stationsLocal || []) {
+    const d = Math.hypot(x - sx, z - sz);
+    if (d < best) best = d;
+  }
+  return Number.isFinite(best) ? best : MAX_STATION_DIST;
+}
+
+function initPollutionHotspots(carRoads, stationsLocal) {
+  const majorRoads = (carRoads || []).filter((r) => BUS_HIGHWAYS.has(r.highway));
+  const points = findIntersections(majorRoads, 3, 40);
+  if (!points.length) return;
+
+  const distNorms = points.map(([x, z]) =>
+    Math.min(1, nearestStationDistLocal(x, z, stationsLocal) / MAX_STATION_DIST),
+  );
+
+  const geo = new THREE.SphereGeometry(8, 16, 12);
+  geo.scale(1, 0.55, 1);
+  geo.translate(0, 15, 0);
+  const material = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const mesh = new THREE.InstancedMesh(geo, material, points.length);
+  const color = new THREE.Color(0.18, 0.8, 0.44);
+  points.forEach(([x, z], i) => {
+    _hotspotDummy.position.set(x, ROAD_Y, z);
+    _hotspotDummy.scale.setScalar(1);
+    _hotspotDummy.updateMatrix();
+    mesh.setMatrixAt(i, _hotspotDummy.matrix);
+    mesh.setColorAt(i, color);
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+
+  pollutionHotspots = { mesh, points, distNorms };
+}
+
+function recolorPollutionHotspots(intensity) {
+  if (!pollutionHotspots) return;
+  const { mesh, distNorms } = pollutionHotspots;
+  const color = new THREE.Color();
+  for (let i = 0; i < distNorms.length; i++) {
+    const [r, g, b] = colorForBuilding(distNorms[i], intensity);
+    color.setRGB(r, g, b);
+    mesh.setColorAt(i, color);
+  }
+  mesh.instanceColor.needsUpdate = true;
+}
+
+function stepPollutionHotspots(elapsed) {
+  if (!pollutionHotspots) return;
+  const { mesh, points } = pollutionHotspots;
+  for (let i = 0; i < points.length; i++) {
+    const [x, z] = points[i];
+    const pulse = 1 + Math.sin(elapsed * 0.8 + i * 1.7) * 0.14;
+    _hotspotDummy.position.set(x, ROAD_Y, z);
+    _hotspotDummy.scale.setScalar(pulse);
+    _hotspotDummy.updateMatrix();
+    mesh.setMatrixAt(i, _hotspotDummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
 }
 
 function buildBoundaryLines() {
@@ -778,6 +1096,7 @@ function pollSelectors() {
     lastSelectorKey = key;
     currentIntensity = computeIntensity(year, pollutant, measure);
     recolorBuildings(currentIntensity);
+    recolorPollutionHotspots(currentIntensity);
     windHue = POLLUTANT_HUES[pollutant] ?? 210;
     if (!manualWindActive) {
       windVector = computeWindVector(year);
@@ -1036,7 +1355,13 @@ async function init() {
 
       if (roadsRaw) {
         setLoading(true, "Yo'llar chizilmoqda...");
-        buildRoadsMesh(processRoads(roadsRaw));
+        const roadData = processRoads(roadsRaw);
+        buildRoadsMesh(roadData);
+        initCars(roadData.carRoads);
+        initBuses(roadData.carRoads);
+        initTrafficLights(roadData.carRoads);
+        initPollutionHotspots(roadData.carRoads, stationCoordsLocal);
+        recolorPollutionHotspots(currentIntensity);
       }
 
       tourStops = buildTourStops();
@@ -1059,6 +1384,10 @@ async function init() {
     if (!isFlying) controls.update();
     stepWindParticles(elapsed);
     stepWindHero(elapsed);
+    stepCars();
+    stepBuses();
+    stepTrafficLights(elapsed);
+    stepPollutionHotspots(elapsed);
     renderer.render(scene, camera);
   });
 }
