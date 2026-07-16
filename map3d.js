@@ -614,7 +614,7 @@ function findIntersections(roads, minDegree, cap) {
 }
 
 function initTrafficLights(carRoads) {
-  const points = findIntersections(carRoads || [], 3, 450);
+  const points = findIntersections(carRoads || [], 3, 700);
   if (!points.length) return;
   trafficLightPositions = points;
 
@@ -744,7 +744,7 @@ function buildGradientDiscGeometry(radius, segments) {
 
 function initPollutionHotspots(carRoads, stationsLocal) {
   const majorRoads = (carRoads || []).filter((r) => BUS_HIGHWAYS.has(r.highway));
-  const points = findIntersections(majorRoads, 2, 140);
+  const points = findIntersections(majorRoads, 2, 220);
   if (!points.length) return;
 
   const distNorms = points.map(([x, z]) =>
@@ -890,7 +890,7 @@ function stepPollutionHotspots(elapsed) {
 
 // ---------- airplanes ----------
 
-const PLANE_COUNT = 16;
+const PLANE_COUNT = 34;
 const PLANE_ALT_RANGE = [340, 560];
 const PLANE_FLY_MARGIN = 900; // meters beyond the wind bounds box before a plane loops back around
 let planeMesh = null;
