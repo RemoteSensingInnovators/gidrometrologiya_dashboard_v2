@@ -241,9 +241,41 @@ function buildBuildingsMesh(records) {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-    buildingRanges.push({ start: vertexOffset, count, distNorm: rec.distNorm });
+    buildingRanges.push({ start: vertexOffset, count, distNorm: rec.distNorm, shade: 1 });
     vertexOffset += count;
     geometries.push(geo);
+
+    // Taller buildings get a slightly inset, darker roof/parapet cap on top so
+    // they read as real buildings instead of plain flat-topped blocks. Skipped
+    // on short buildings (houses) both for looks and to keep triangle count down.
+    if (rec.height > 18) {
+      let cx = 0, cy = 0;
+      for (const [x, y] of rec.points) { cx += x; cy += y; }
+      cx /= rec.points.length; cy /= rec.points.length;
+
+      const roofShape = new THREE.Shape();
+      rec.points.forEach(([x, y], idx) => {
+        const ix = cx + (x - cx) * 0.88, iy = cy + (y - cy) * 0.88;
+        if (idx === 0) roofShape.moveTo(ix, iy); else roofShape.lineTo(ix, iy);
+      });
+
+      const roofH = Math.min(2.4, Math.max(0.9, rec.height * 0.035));
+      const roofGeo = new THREE.ExtrudeGeometry(roofShape, { depth: roofH, bevelEnabled: false });
+      roofGeo.rotateX(-Math.PI / 2);
+      roofGeo.translate(0, rec.height + 0.04, 0); // small lift avoids z-fighting with the body's top cap
+
+      const roofCount = roofGeo.attributes.position.count;
+      const roofShade = 0.68;
+      const roofColors = new Float32Array(roofCount * 3);
+      for (let i = 0; i < roofCount; i++) {
+        roofColors[i * 3] = r * roofShade; roofColors[i * 3 + 1] = g * roofShade; roofColors[i * 3 + 2] = b * roofShade;
+      }
+      roofGeo.setAttribute('color', new THREE.BufferAttribute(roofColors, 3));
+
+      buildingRanges.push({ start: vertexOffset, count: roofCount, distNorm: rec.distNorm, shade: roofShade });
+      vertexOffset += roofCount;
+      geometries.push(roofGeo);
+    }
   }
 
   const merged = mergeGeometries(geometries, false);
@@ -266,8 +298,9 @@ function recolorBuildings(intensity) {
   const colorAttr = buildingsMesh.geometry.attributes.color;
   for (const range of buildingRanges) {
     const [r, g, b] = colorForBuilding(range.distNorm, intensity);
+    const s = range.shade ?? 1;
     for (let i = range.start; i < range.start + range.count; i++) {
-      colorAttr.setXYZ(i, r, g, b);
+      colorAttr.setXYZ(i, r * s, g * s, b * s);
     }
   }
   colorAttr.needsUpdate = true;
@@ -853,6 +886,99 @@ function stepPollutionHotspots(elapsed) {
   }
   coreMesh.instanceMatrix.needsUpdate = true;
   ringMesh.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- airplanes ----------
+
+const PLANE_COUNT = 6;
+const PLANE_ALT_RANGE = [340, 560];
+const PLANE_FLY_MARGIN = 900; // meters beyond the wind bounds box before a plane loops back around
+let planeMesh = null;
+let planeState = [];
+const _planeDummy = new THREE.Object3D();
+const _planeDir = new THREE.Vector3();
+
+function buildPlaneGeometry() {
+  const parts = [];
+
+  const fuselage = new THREE.BoxGeometry(20, 2.6, 2.6);
+  parts.push(tintGeometry(fuselage, 1, 1, 1));
+
+  const nose = new THREE.BoxGeometry(4, 1.8, 1.8);
+  nose.translate(11, 0, 0);
+  parts.push(tintGeometry(nose, 1, 1, 1));
+
+  const wings = new THREE.BoxGeometry(3.2, 0.6, 30);
+  wings.translate(-1, 0, 0);
+  parts.push(tintGeometry(wings, 0.85, 0.88, 0.93));
+
+  const tailplane = new THREE.BoxGeometry(2.4, 0.5, 11);
+  tailplane.translate(-9, 0, 0);
+  parts.push(tintGeometry(tailplane, 0.85, 0.88, 0.93));
+
+  const tailFin = new THREE.BoxGeometry(2.6, 5.2, 0.8);
+  tailFin.translate(-9.2, 2.8, 0);
+  parts.push(tintGeometry(tailFin, 0.75, 0.16, 0.14)); // red tail accent
+
+  return mergeGeometries(parts, false);
+}
+
+function planeFlightBox() {
+  return {
+    cx: (windBounds.maxX + windBounds.minX) / 2,
+    cz: (windBounds.maxZ + windBounds.minZ) / 2,
+    bx: (windBounds.maxX - windBounds.minX) / 2 + PLANE_FLY_MARGIN,
+    bz: (windBounds.maxZ - windBounds.minZ) / 2 + PLANE_FLY_MARGIN,
+  };
+}
+
+function initPlanes() {
+  const geo = buildPlaneGeometry();
+  const material = new THREE.MeshStandardMaterial({
+    roughness: 0.35,
+    metalness: 0.45,
+    vertexColors: true,
+    emissive: 0x0a0a0a,
+    emissiveIntensity: 0.5,
+  });
+  planeMesh = new THREE.InstancedMesh(geo, material, PLANE_COUNT);
+  planeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const { cx, cz, bx, bz } = planeFlightBox();
+  planeState = [];
+  for (let i = 0; i < PLANE_COUNT; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    planeState.push({
+      x: cx + (Math.random() * 2 - 1) * bx,
+      z: cz + (Math.random() * 2 - 1) * bz,
+      y: PLANE_ALT_RANGE[0] + Math.random() * (PLANE_ALT_RANGE[1] - PLANE_ALT_RANGE[0]),
+      dirX: Math.cos(angle),
+      dirZ: Math.sin(angle),
+      speed: 1.3 + Math.random() * 1.1,
+    });
+  }
+  scene.add(planeMesh);
+}
+
+function stepPlanes() {
+  if (!planeMesh) return;
+  const { cx, cz, bx, bz } = planeFlightBox();
+  for (let i = 0; i < planeState.length; i++) {
+    const p = planeState[i];
+    p.x += p.dirX * p.speed;
+    p.z += p.dirZ * p.speed;
+    if (p.x < cx - bx || p.x > cx + bx || p.z < cz - bz || p.z > cz + bz) {
+      // looped past the flight box — re-enter from the opposite edge, same heading
+      p.x = cx - p.dirX * bx * 0.98;
+      p.z = cz - p.dirZ * bz * 0.98;
+    }
+    _planeDir.set(p.dirX, 0, p.dirZ);
+    _planeDummy.position.set(p.x, p.y, p.z);
+    _planeDummy.quaternion.setFromUnitVectors(UNIT_X, _planeDir);
+    _planeDummy.updateMatrix();
+    planeMesh.setMatrixAt(i, _planeDummy.matrix);
+  }
+  planeMesh.instanceMatrix.needsUpdate = true;
 }
 
 function buildBoundaryLines() {
@@ -1472,6 +1598,21 @@ async function init() {
   controls.maxPolarAngle = Math.PI * 0.49;
   controls.minDistance = 40;
   controls.maxDistance = 1400;
+  // OrbitControls captures every wheel event to zoom by default, which blocks
+  // the page from scrolling whenever the cursor is over the 3D canvas. Turn
+  // its own wheel handling off and only dolly the camera on Ctrl+scroll, so a
+  // plain scroll passes through to the page like everywhere else.
+  controls.enableZoom = false;
+  container.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+    dir.multiplyScalar(e.deltaY < 0 ? 0.9 : 1.1);
+    const dist = dir.length();
+    if (dist > controls.minDistance && dist < controls.maxDistance) {
+      camera.position.copy(controls.target).add(dir);
+    }
+  }, { passive: false });
   controls.update();
 
   scene.add(new THREE.HemisphereLight(0xbfdcff, 0x10243f, 1.15));
@@ -1561,6 +1702,7 @@ async function init() {
 
     initWindParticles();
     buildWindHero();
+    initPlanes();
     pollSelectors();
     setInterval(pollSelectors, 400);
 
@@ -1580,6 +1722,7 @@ async function init() {
     stepBuses();
     stepTrafficLights(elapsed);
     stepPollutionHotspots(elapsed);
+    stepPlanes();
     renderer.render(scene, camera);
   });
 }

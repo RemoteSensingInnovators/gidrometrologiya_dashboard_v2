@@ -399,12 +399,25 @@ function initSelectors() {
 
 function initMap() {
   const mapContainer = document.getElementById('map');
-  map = L.map(mapContainer, { zoomControl: true }).setView([39.6, 66.9], 11);
+  // scrollWheelZoom off by default so a normal scroll over the map scrolls the
+  // page like everywhere else; Ctrl+scroll (handled below) zooms the map instead.
+  map = L.map(mapContainer, { zoomControl: true, scrollWheelZoom: false }).setView([39.6, 66.9], 11);
+
+  mapContainer.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    map.setZoom(map.getZoom() + (e.deltaY < 0 ? 1 : -1), { animate: true });
+  }, { passive: false });
 
   const gasBadge = document.createElement('div');
   gasBadge.id = 'mapGasBadge';
   gasBadge.className = 'map-gas-badge';
   mapContainer.appendChild(gasBadge);
+
+  const scrollHint = document.createElement('div');
+  scrollHint.className = 'map-scroll-hint';
+  scrollHint.textContent = 'Ctrl + g‘ildirak: kattalashtirish';
+  mapContainer.appendChild(scrollHint);
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
