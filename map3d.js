@@ -630,8 +630,12 @@ function stepTrafficLights(elapsed) {
 }
 
 // ---------- pollution haze at major intersections ----------
+// Ground-hugging radial gradient "stain" spreading from each busy intersection
+// (like a real-world air-quality heat map: hot core fading outward), plus a
+// small pulsing glow core above it so it still reads from a distance.
 
-let pollutionHotspots = null; // { mesh, points, distNorms }
+const HOTSPOT_BASE_RADIUS = 30;
+let pollutionHotspots = null; // { groundMesh, coreMesh, points, distNorms }
 const _hotspotDummy = new THREE.Object3D();
 
 function nearestStationDistLocal(x, z, stationsLocal) {
@@ -643,6 +647,23 @@ function nearestStationDistLocal(x, z, stationsLocal) {
   return Number.isFinite(best) ? best : MAX_STATION_DIST;
 }
 
+// A flat disc whose per-vertex alpha fades from opaque at the center to
+// transparent at the rim; combined with an instance color this becomes a
+// radiating gradient patch, like the pollution spreading out from a crossroads.
+function buildGradientDiscGeometry(radius, segments) {
+  const geo = new THREE.CircleGeometry(radius, segments);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const rgba = new Float32Array(pos.count * 4);
+  for (let i = 0; i < pos.count; i++) {
+    const t = Math.min(1, Math.hypot(pos.getX(i), pos.getZ(i)) / radius);
+    const alpha = Math.pow(1 - t, 1.7) * 0.85;
+    rgba[i * 4] = 1; rgba[i * 4 + 1] = 1; rgba[i * 4 + 2] = 1; rgba[i * 4 + 3] = alpha;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(rgba, 4));
+  return geo;
+}
+
 function initPollutionHotspots(carRoads, stationsLocal) {
   const majorRoads = (carRoads || []).filter((r) => BUS_HIGHWAYS.has(r.highway));
   const points = findIntersections(majorRoads, 3, 40);
@@ -652,55 +673,83 @@ function initPollutionHotspots(carRoads, stationsLocal) {
     Math.min(1, nearestStationDistLocal(x, z, stationsLocal) / MAX_STATION_DIST),
   );
 
-  const geo = new THREE.SphereGeometry(8, 16, 12);
-  geo.scale(1, 0.55, 1);
-  geo.translate(0, 15, 0);
-  const material = new THREE.MeshBasicMaterial({
+  const groundGeo = buildGradientDiscGeometry(HOTSPOT_BASE_RADIUS, 40);
+  const groundMaterial = new THREE.MeshBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.5,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const groundMesh = new THREE.InstancedMesh(groundGeo, groundMaterial, points.length);
+
+  const coreGeo = new THREE.SphereGeometry(5, 14, 10);
+  coreGeo.scale(1, 0.5, 1);
+  coreGeo.translate(0, 12, 0);
+  const coreMaterial = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.55,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
-  const mesh = new THREE.InstancedMesh(geo, material, points.length);
+  const coreMesh = new THREE.InstancedMesh(coreGeo, coreMaterial, points.length);
+
   const color = new THREE.Color(0.18, 0.8, 0.44);
   points.forEach(([x, z], i) => {
-    _hotspotDummy.position.set(x, ROAD_Y, z);
+    _hotspotDummy.position.set(x, ROAD_Y + 0.03, z);
     _hotspotDummy.scale.setScalar(1);
     _hotspotDummy.updateMatrix();
-    mesh.setMatrixAt(i, _hotspotDummy.matrix);
-    mesh.setColorAt(i, color);
-  });
-  mesh.instanceMatrix.needsUpdate = true;
-  scene.add(mesh);
+    groundMesh.setMatrixAt(i, _hotspotDummy.matrix);
+    groundMesh.setColorAt(i, color);
 
-  pollutionHotspots = { mesh, points, distNorms };
+    _hotspotDummy.position.set(x, ROAD_Y, z);
+    _hotspotDummy.updateMatrix();
+    coreMesh.setMatrixAt(i, _hotspotDummy.matrix);
+    coreMesh.setColorAt(i, color);
+  });
+  groundMesh.instanceMatrix.needsUpdate = true;
+  coreMesh.instanceMatrix.needsUpdate = true;
+  scene.add(groundMesh);
+  scene.add(coreMesh);
+
+  pollutionHotspots = { groundMesh, coreMesh, points, distNorms };
 }
 
 function recolorPollutionHotspots(intensity) {
   if (!pollutionHotspots) return;
-  const { mesh, distNorms } = pollutionHotspots;
+  const { groundMesh, points, distNorms } = pollutionHotspots;
   const color = new THREE.Color();
   for (let i = 0; i < distNorms.length; i++) {
     const [r, g, b] = colorForBuilding(distNorms[i], intensity);
     color.setRGB(r, g, b);
-    mesh.setColorAt(i, color);
+    groundMesh.setColorAt(i, color);
+    pollutionHotspots.coreMesh.setColorAt(i, color);
+
+    // worse pollution -> the ground stain spreads further, like real gridlock haze
+    const score = Math.max(0, Math.min(1, (1 - distNorms[i]) * intensity));
+    const [x, z] = points[i];
+    _hotspotDummy.position.set(x, ROAD_Y + 0.03, z);
+    _hotspotDummy.scale.setScalar(0.55 + score * 1.05);
+    _hotspotDummy.updateMatrix();
+    groundMesh.setMatrixAt(i, _hotspotDummy.matrix);
   }
-  mesh.instanceColor.needsUpdate = true;
+  groundMesh.instanceMatrix.needsUpdate = true;
+  groundMesh.instanceColor.needsUpdate = true;
+  pollutionHotspots.coreMesh.instanceColor.needsUpdate = true;
 }
 
 function stepPollutionHotspots(elapsed) {
   if (!pollutionHotspots) return;
-  const { mesh, points } = pollutionHotspots;
+  const { coreMesh, points } = pollutionHotspots;
   for (let i = 0; i < points.length; i++) {
     const [x, z] = points[i];
     const pulse = 1 + Math.sin(elapsed * 0.8 + i * 1.7) * 0.14;
     _hotspotDummy.position.set(x, ROAD_Y, z);
     _hotspotDummy.scale.setScalar(pulse);
     _hotspotDummy.updateMatrix();
-    mesh.setMatrixAt(i, _hotspotDummy.matrix);
+    coreMesh.setMatrixAt(i, _hotspotDummy.matrix);
   }
-  mesh.instanceMatrix.needsUpdate = true;
+  coreMesh.instanceMatrix.needsUpdate = true;
 }
 
 function buildBoundaryLines() {
