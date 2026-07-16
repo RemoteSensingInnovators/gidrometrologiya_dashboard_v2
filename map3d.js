@@ -614,7 +614,7 @@ function findIntersections(roads, minDegree, cap) {
 }
 
 function initTrafficLights(carRoads) {
-  const points = findIntersections(carRoads || [], 3, 260);
+  const points = findIntersections(carRoads || [], 3, 450);
   if (!points.length) return;
   trafficLightPositions = points;
 
@@ -744,7 +744,7 @@ function buildGradientDiscGeometry(radius, segments) {
 
 function initPollutionHotspots(carRoads, stationsLocal) {
   const majorRoads = (carRoads || []).filter((r) => BUS_HIGHWAYS.has(r.highway));
-  const points = findIntersections(majorRoads, 3, 80);
+  const points = findIntersections(majorRoads, 2, 140);
   if (!points.length) return;
 
   const distNorms = points.map(([x, z]) =>
