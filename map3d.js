@@ -20,6 +20,11 @@ const POLLUTANT_HUES = {
   SO2: 205, NO2: 275, NH3: 135, HF: 320, NO: 28, Fenol: 355, CO: 45, CL: 165, Chang: 95,
 };
 
+const GAS_NAMES = {
+  SO2: 'SO₂', NO2: 'NO₂', NH3: 'NH₃', HF: 'HF', NO: 'NO',
+  Fenol: 'Fenol', CO: 'CO', CL: 'Cl₂', Chang: 'Chang',
+};
+
 let renderer, scene, camera, controls, container;
 let buildingsMesh = null;
 let buildingRanges = []; // [{ start, count, distNorm }]
@@ -635,7 +640,7 @@ function stepTrafficLights(elapsed) {
 // small pulsing glow core above it so it still reads from a distance.
 
 const HOTSPOT_BASE_RADIUS = 30;
-let pollutionHotspots = null; // { groundMesh, coreMesh, points, distNorms }
+let pollutionHotspots = null; // { groundMesh, coreMesh, ringMesh, labels, points, distNorms }
 const _hotspotDummy = new THREE.Object3D();
 
 function nearestStationDistLocal(x, z, stationsLocal) {
@@ -645,6 +650,46 @@ function nearestStationDistLocal(x, z, stationsLocal) {
     if (d < best) best = d;
   }
   return Number.isFinite(best) ? best : MAX_STATION_DIST;
+}
+
+function severityLabel(score) {
+  if (score >= 0.55) return 'Yuqori';
+  if (score >= 0.25) return "O'rta";
+  return 'Past';
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Redraws a small floating badge with the current gas code + severity word,
+// color-matched to the hotspot — the 3D-scene equivalent of the labeled
+// callouts on a real air-quality intersection diagram.
+function drawHotspotLabel(ctx, canvas, gasName, severityText, colorCss) {
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(8, 14, 28, 0.85)';
+  roundRectPath(ctx, 4, 4, w - 8, h - 8, 20);
+  ctx.fill();
+  ctx.strokeStyle = colorCss;
+  ctx.lineWidth = 5;
+  roundRectPath(ctx, 4, 4, w - 8, h - 8, 20);
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f5f8ff';
+  ctx.font = 'bold 36px Arial, sans-serif';
+  ctx.fillText(gasName, w / 2, h * 0.46);
+
+  ctx.fillStyle = colorCss;
+  ctx.font = 'bold 26px Arial, sans-serif';
+  ctx.fillText(severityText.toUpperCase(), w / 2, h * 0.82);
 }
 
 // A flat disc whose per-vertex alpha fades from opaque at the center to
@@ -657,7 +702,7 @@ function buildGradientDiscGeometry(radius, segments) {
   const rgba = new Float32Array(pos.count * 4);
   for (let i = 0; i < pos.count; i++) {
     const t = Math.min(1, Math.hypot(pos.getX(i), pos.getZ(i)) / radius);
-    const alpha = Math.pow(1 - t, 1.7) * 0.85;
+    const alpha = Math.pow(1 - t, 2.1) * 0.9;
     rgba[i * 4] = 1; rgba[i * 4 + 1] = 1; rgba[i * 4 + 2] = 1; rgba[i * 4 + 3] = alpha;
   }
   geo.setAttribute('color', new THREE.BufferAttribute(rgba, 4));
@@ -673,7 +718,7 @@ function initPollutionHotspots(carRoads, stationsLocal) {
     Math.min(1, nearestStationDistLocal(x, z, stationsLocal) / MAX_STATION_DIST),
   );
 
-  const groundGeo = buildGradientDiscGeometry(HOTSPOT_BASE_RADIUS, 40);
+  const groundGeo = buildGradientDiscGeometry(HOTSPOT_BASE_RADIUS, 56);
   const groundMaterial = new THREE.MeshBasicMaterial({
     vertexColors: true,
     transparent: true,
@@ -682,17 +727,44 @@ function initPollutionHotspots(carRoads, stationsLocal) {
   });
   const groundMesh = new THREE.InstancedMesh(groundGeo, groundMaterial, points.length);
 
-  const coreGeo = new THREE.SphereGeometry(5, 14, 10);
+  const coreGeo = new THREE.SphereGeometry(5, 16, 12);
   coreGeo.scale(1, 0.5, 1);
   coreGeo.translate(0, 12, 0);
   const coreMaterial = new THREE.MeshBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.6,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
   const coreMesh = new THREE.InstancedMesh(coreGeo, coreMaterial, points.length);
+
+  // thin ring that continuously expands and fades outward, like a radar ping,
+  // reinforcing the "pollution spreading from this crossroads" idea
+  const ringGeo = new THREE.RingGeometry(0.85, 1, 40);
+  ringGeo.rotateX(-Math.PI / 2);
+  const ringMaterial = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.4,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  });
+  const ringMesh = new THREE.InstancedMesh(ringGeo, ringMaterial, points.length);
+
+  const labels = points.map(([x, z]) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 100;
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
+    const sprite = new THREE.Sprite(material);
+    sprite.position.set(x, ROAD_Y + 22, z);
+    sprite.scale.set(28, 11, 1);
+    scene.add(sprite);
+    return { sprite, canvas, ctx: canvas.getContext('2d'), texture, lastKey: '' };
+  });
 
   const color = new THREE.Color(0.18, 0.8, 0.44);
   points.forEach(([x, z], i) => {
@@ -706,24 +778,33 @@ function initPollutionHotspots(carRoads, stationsLocal) {
     _hotspotDummy.updateMatrix();
     coreMesh.setMatrixAt(i, _hotspotDummy.matrix);
     coreMesh.setColorAt(i, color);
+
+    _hotspotDummy.position.set(x, ROAD_Y + 0.05, z);
+    _hotspotDummy.updateMatrix();
+    ringMesh.setMatrixAt(i, _hotspotDummy.matrix);
+    ringMesh.setColorAt(i, color);
   });
   groundMesh.instanceMatrix.needsUpdate = true;
   coreMesh.instanceMatrix.needsUpdate = true;
+  ringMesh.instanceMatrix.needsUpdate = true;
   scene.add(groundMesh);
   scene.add(coreMesh);
+  scene.add(ringMesh);
 
-  pollutionHotspots = { groundMesh, coreMesh, points, distNorms };
+  pollutionHotspots = { groundMesh, coreMesh, ringMesh, labels, points, distNorms };
 }
 
-function recolorPollutionHotspots(intensity) {
+function recolorPollutionHotspots(intensity, pollutantCode) {
   if (!pollutionHotspots) return;
-  const { groundMesh, points, distNorms } = pollutionHotspots;
+  const { groundMesh, coreMesh, ringMesh, labels, points, distNorms } = pollutionHotspots;
+  const gasName = GAS_NAMES[pollutantCode] || pollutantCode || '';
   const color = new THREE.Color();
   for (let i = 0; i < distNorms.length; i++) {
     const [r, g, b] = colorForBuilding(distNorms[i], intensity);
     color.setRGB(r, g, b);
     groundMesh.setColorAt(i, color);
-    pollutionHotspots.coreMesh.setColorAt(i, color);
+    coreMesh.setColorAt(i, color);
+    ringMesh.setColorAt(i, color);
 
     // worse pollution -> the ground stain spreads further, like real gridlock haze
     const score = Math.max(0, Math.min(1, (1 - distNorms[i]) * intensity));
@@ -732,15 +813,29 @@ function recolorPollutionHotspots(intensity) {
     _hotspotDummy.scale.setScalar(0.55 + score * 1.05);
     _hotspotDummy.updateMatrix();
     groundMesh.setMatrixAt(i, _hotspotDummy.matrix);
+
+    const label = labels[i];
+    if (label && gasName) {
+      const sevText = severityLabel(score);
+      const key = `${gasName}|${sevText}`;
+      if (label.lastKey !== key) {
+        label.lastKey = key;
+        const colorCss = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+        drawHotspotLabel(label.ctx, label.canvas, gasName, sevText, colorCss);
+        label.texture.needsUpdate = true;
+      }
+    }
   }
   groundMesh.instanceMatrix.needsUpdate = true;
   groundMesh.instanceColor.needsUpdate = true;
-  pollutionHotspots.coreMesh.instanceColor.needsUpdate = true;
+  coreMesh.instanceColor.needsUpdate = true;
+  ringMesh.instanceColor.needsUpdate = true;
 }
 
 function stepPollutionHotspots(elapsed) {
   if (!pollutionHotspots) return;
-  const { coreMesh, points } = pollutionHotspots;
+  const { coreMesh, ringMesh, points } = pollutionHotspots;
+  const RING_CYCLE = 3.2;
   for (let i = 0; i < points.length; i++) {
     const [x, z] = points[i];
     const pulse = 1 + Math.sin(elapsed * 0.8 + i * 1.7) * 0.14;
@@ -748,8 +843,16 @@ function stepPollutionHotspots(elapsed) {
     _hotspotDummy.scale.setScalar(pulse);
     _hotspotDummy.updateMatrix();
     coreMesh.setMatrixAt(i, _hotspotDummy.matrix);
+
+    const t = ((elapsed + i * 0.6) % RING_CYCLE) / RING_CYCLE; // 0..1 expanding ping
+    const ringRadius = 6 + t * HOTSPOT_BASE_RADIUS * 1.1;
+    _hotspotDummy.position.set(x, ROAD_Y + 0.05, z);
+    _hotspotDummy.scale.set(ringRadius, ringRadius, ringRadius);
+    _hotspotDummy.updateMatrix();
+    ringMesh.setMatrixAt(i, _hotspotDummy.matrix);
   }
   coreMesh.instanceMatrix.needsUpdate = true;
+  ringMesh.instanceMatrix.needsUpdate = true;
 }
 
 function buildBoundaryLines() {
@@ -1186,7 +1289,7 @@ function pollSelectors() {
     lastSelectorKey = key;
     currentIntensity = computeIntensity(year, pollutant, measure);
     recolorBuildings(currentIntensity);
-    recolorPollutionHotspots(currentIntensity);
+    recolorPollutionHotspots(currentIntensity, pollutant);
     windHue = POLLUTANT_HUES[pollutant] ?? 210;
     if (!manualWindActive) {
       windVector = computeWindVector(year);
@@ -1451,7 +1554,6 @@ async function init() {
         initBuses(roadData.carRoads);
         initTrafficLights(roadData.carRoads);
         initPollutionHotspots(roadData.carRoads, stationCoordsLocal);
-        recolorPollutionHotspots(currentIntensity);
       }
 
       tourStops = buildTourStops();
