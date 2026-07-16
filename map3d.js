@@ -614,7 +614,7 @@ function findIntersections(roads, minDegree, cap) {
 }
 
 function initTrafficLights(carRoads) {
-  const points = findIntersections(carRoads || [], 3, 700);
+  const points = findIntersections(carRoads || [], 3, 1000);
   if (!points.length) return;
   trafficLightPositions = points;
 
@@ -744,7 +744,7 @@ function buildGradientDiscGeometry(radius, segments) {
 
 function initPollutionHotspots(carRoads, stationsLocal) {
   const majorRoads = (carRoads || []).filter((r) => BUS_HIGHWAYS.has(r.highway));
-  const points = findIntersections(majorRoads, 2, 220);
+  const points = findIntersections(majorRoads, 2, 320);
   if (!points.length) return;
 
   const distNorms = points.map(([x, z]) =>
@@ -979,6 +979,97 @@ function stepPlanes() {
     planeMesh.setMatrixAt(i, _planeDummy.matrix);
   }
   planeMesh.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- train ----------
+// Runs a small shuttle train back and forth along the single longest major
+// road in the network (a stand-in "rail corridor" — the dataset has no
+// actual railway geometry), with a thin track line drawn under it.
+
+const TRAIN_CARRIAGES = 5;
+const TRAIN_CAR_LEN = 16;
+const TRAIN_SPACING = TRAIN_CAR_LEN + 1.5;
+let trainRoad = null;
+let trainState = null; // { dist, dir, speed }
+let trainMesh = null; // THREE.Group of carriage meshes
+
+function pickTrainRoad(carRoads) {
+  let best = null;
+  for (const r of carRoads || []) {
+    if (!BUS_HIGHWAYS.has(r.highway)) continue;
+    if (!best || r.total > best.total) best = r;
+  }
+  return best;
+}
+
+function buildTrainCarGeometry(len, isEngine) {
+  const parts = [];
+  const bodyColor = isEngine ? [0.14, 0.32, 0.2] : [0.92, 0.9, 0.83];
+
+  const body = new THREE.BoxGeometry(len, 3.4, 3.0);
+  body.translate(0, 1.9, 0);
+  parts.push(tintGeometry(body, ...bodyColor));
+
+  const roofStripe = new THREE.BoxGeometry(len * 0.96, 0.5, 3.05);
+  roofStripe.translate(0, 3.7, 0);
+  parts.push(tintGeometry(roofStripe, 0.7, 0.16, 0.14));
+
+  if (isEngine) {
+    const nose = new THREE.BoxGeometry(2.4, 2.6, 2.6);
+    nose.translate(len / 2 + 1, 1.7, 0);
+    parts.push(tintGeometry(nose, ...bodyColor));
+  }
+
+  for (const wx of [len / 2 - 2.2, -len / 2 + 2.2]) {
+    const bogie = new THREE.BoxGeometry(2.4, 0.9, 2.9);
+    bogie.translate(wx, 0.5, 0);
+    parts.push(tintGeometry(bogie, 0.08, 0.08, 0.08));
+  }
+
+  return mergeGeometries(parts, false);
+}
+
+function buildRailLine(road) {
+  const pts = road.points.map(([x, z]) => new THREE.Vector3(x, ROAD_Y + 0.15, z));
+  const material = new THREE.LineBasicMaterial({ color: 0x8a8f97 });
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), material));
+}
+
+function initTrain(carRoads) {
+  trainRoad = pickTrainRoad(carRoads);
+  if (!trainRoad || trainRoad.total < 200) { trainRoad = null; return; }
+
+  buildRailLine(trainRoad);
+
+  trainState = { dist: trainRoad.total * 0.5, dir: 1, speed: 0.55 };
+  trainMesh = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, metalness: 0.35 });
+  for (let i = 0; i < TRAIN_CARRIAGES; i++) {
+    const geo = buildTrainCarGeometry(TRAIN_CAR_LEN, i === 0);
+    trainMesh.add(new THREE.Mesh(geo, material));
+  }
+  scene.add(trainMesh);
+}
+
+function stepTrain() {
+  if (!trainRoad || !trainState) return;
+  trainState.dist += trainState.dir * trainState.speed;
+  if (trainState.dist >= trainRoad.total) { trainState.dist = trainRoad.total; trainState.dir = -1; }
+  else if (trainState.dist <= 0) { trainState.dist = 0; trainState.dir = 1; }
+
+  for (let i = 0; i < trainMesh.children.length; i++) {
+    const carDist = Math.min(trainRoad.total, Math.max(0, trainState.dist - trainState.dir * i * TRAIN_SPACING));
+    const p = pointAtDistance(trainRoad, carDist);
+    const aheadDist = Math.min(trainRoad.total, Math.max(0, carDist + trainState.dir * 0.6));
+    const p2 = pointAtDistance(trainRoad, aheadDist);
+    _vehicleDir.set(p2.x - p.x, 0, p2.z - p.z);
+    if (_vehicleDir.lengthSq() < 1e-6) _vehicleDir.set(1, 0, 0);
+    else _vehicleDir.normalize();
+
+    const car = trainMesh.children[i];
+    car.position.set(p.x, ROAD_Y + 0.05, p.z);
+    car.quaternion.setFromUnitVectors(UNIT_X, _vehicleDir);
+  }
 }
 
 function buildBoundaryLines() {
@@ -1695,6 +1786,7 @@ async function init() {
         initBuses(roadData.carRoads);
         initTrafficLights(roadData.carRoads);
         initPollutionHotspots(roadData.carRoads, stationCoordsLocal);
+        initTrain(roadData.carRoads);
       }
 
       tourStops = buildTourStops();
@@ -1723,6 +1815,7 @@ async function init() {
     stepTrafficLights(elapsed);
     stepPollutionHotspots(elapsed);
     stepPlanes();
+    stepTrain();
     renderer.render(scene, camera);
   });
 }
